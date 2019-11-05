@@ -1,8 +1,10 @@
 import os
 import numpy as np
 from pyzfp import decompress
+import threading
 
 from .utils import pad, bytes_to_int
+from .threadfuncs import zslice_threadfunc
 
 DISK_BLOCK_BYTES = 4096
 
@@ -119,6 +121,7 @@ class SzReader:
 
         return decompressed[0:self.ilines, xl_id % self.blockshape[1], 0:self.tracelength]
 
+
     def read_zslice(self, zslice_id):
         """Reads one zslice from SZ file (time or depth, depending on file contents)
 
@@ -139,12 +142,20 @@ class SzReader:
         # Allocate memory for compressed data
         buffer = bytearray(self.unit_bytes * (self.shape_pad[0] // 4) * (self.shape_pad[1] // 4))
 
-        with open(self.filename, 'rb') as f:
-            for block_num in range((self.shape_pad[0] // 4) * (self.shape_pad[1] // 4)):
-                f.seek(self.data_start_bytes + zslice_first_block_offset*self.block_bytes
-                                             + zslice_unit_in_block*self.unit_bytes
-                                             + block_num*self.chunk_bytes, 0)
-                buffer[block_num*self.unit_bytes:(block_num+1)*self.unit_bytes] = f.read(self.unit_bytes)
+        n_threads = 20
+
+        block_ids = np.arange((self.shape_pad[0] // 4) * (self.shape_pad[1] // 4), dtype=np.int)
+        ranges = np.split(block_ids, n_threads)
+        threads = {}
+        for i, t_range in enumerate(ranges):
+            threads[i] = threading.Thread(target=zslice_threadfunc,
+                                          args=(self.filename, t_range, buffer, self.data_start_bytes,
+                                                zslice_first_block_offset, self.block_bytes,
+                                                zslice_unit_in_block, self.unit_bytes, self.chunk_bytes))
+            threads[i].start()
+
+        for k, t in threads.items():
+            t.join()
 
         # Specify dtype otherwise pyzfp gets upset.
         decompressed = decompress(buffer, (self.shape_pad[0], self.shape_pad[1], 4),
