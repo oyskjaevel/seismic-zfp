@@ -142,10 +142,10 @@ class SzReader:
         # Allocate memory for compressed data
         buffer = bytearray(self.unit_bytes * (self.shape_pad[0] // 4) * (self.shape_pad[1] // 4))
 
-        n_threads = 20
+        n_threads = 32
 
         block_ids = np.arange((self.shape_pad[0] // 4) * (self.shape_pad[1] // 4), dtype=np.int)
-        ranges = np.split(block_ids, n_threads)
+        ranges = np.array_split(block_ids, n_threads)
         threads = {}
         for i, t_range in enumerate(ranges):
             threads[i] = threading.Thread(target=zslice_threadfunc,
