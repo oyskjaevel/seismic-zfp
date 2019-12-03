@@ -4,8 +4,9 @@ import segyio
 import asyncio
 import time
 from psutil import virtual_memory
+import sys
 
-from .utils import pad, np_float_to_bytes, define_blockshape
+from .utils import pad, np_float_to_bytes, define_blockshape, is_2d
 
 DISK_BLOCK_BYTES = 4096
 
@@ -77,19 +78,31 @@ def make_header(in_filename, bits_per_voxel, blockshape=(4,4,-1)):
     buffer = bytearray(DISK_BLOCK_BYTES * header_blocks)
     buffer[0:4] = header_blocks.to_bytes(4, byteorder='little')
 
-    with segyio.open(in_filename) as segyfile:
+    with segyio.open(in_filename, strict=False) as segyfile:
+
+        if is_2d(blockshape):
+            n_xlines = len(segyfile.trace)
+            n_ilines = 1
+            ilines = np.zeros(2)
+            xlines = np.arange(2)
+        else:
+            n_xlines = len(segyfile.xlines)
+            n_ilines = len(segyfile.ilines)
+            ilines = segyfile.ilines
+            xlines = segyfile.xlines
+            
         buffer[4:8] = len(segyfile.samples).to_bytes(4, byteorder='little')
-        buffer[8:12] = len(segyfile.xlines).to_bytes(4, byteorder='little')
-        buffer[12:16] = len(segyfile.ilines).to_bytes(4, byteorder='little')
+        buffer[8:12] = n_xlines.to_bytes(4, byteorder='little')
+        buffer[12:16] = n_ilines.to_bytes(4, byteorder='little')
 
         # N.B. this format currently only supports integer number of ms as sampling frequency
         buffer[16:20] = np_float_to_bytes(segyfile.samples[0])
-        buffer[20:24] = np_float_to_bytes(segyfile.xlines[0])
-        buffer[24:28] = np_float_to_bytes(segyfile.ilines[0])
+        buffer[20:24] = np_float_to_bytes(xlines[0])
+        buffer[24:28] = np_float_to_bytes(ilines[0])
 
         buffer[28:32] = np_float_to_bytes(segyfile.samples[1] - segyfile.samples[0])
-        buffer[32:36] = np_float_to_bytes(segyfile.xlines[1] - segyfile.xlines[0])
-        buffer[36:40] = np_float_to_bytes(segyfile.ilines[1] - segyfile.ilines[0])
+        buffer[32:36] = np_float_to_bytes(xlines[1] - xlines[0])
+        buffer[36:40] = np_float_to_bytes(ilines[1] - ilines[0])
 
     buffer[40:44] = bits_per_voxel.to_bytes(4, byteorder='little')
 
@@ -169,26 +182,35 @@ def convert_segy_inmem_advanced(in_filename, out_filename, bits_per_voxel, block
 
 async def produce(queue, in_filename, blockshape):
     """Reads and compresses data from input file, and puts it in the queue for writing to disk"""
-    with segyio.open(in_filename) as segyfile:
+    with segyio.open(in_filename, strict=False) as segyfile:
 
-        test_slice = segyfile.iline[segyfile.ilines[0]]
-        trace_length = test_slice.shape[1]
-        n_xlines = len(segyfile.xlines)
-        n_ilines = len(segyfile.ilines)
-
-        padded_shape = (pad(n_ilines, blockshape[0]), pad(n_xlines, blockshape[1]), pad(trace_length, blockshape[2]))
+        if is_2d(blockshape):
+            lines = lambda l : [segyfile.trace[i] for i in range(len(segyfile.trace))]
+            n_lines = 1
+            idxer = [0]
+            n_xlines = len(segyfile.trace)
+            trace_length = len(segyfile.trace[0])
+        else:
+            lines = lambda l : segyfile.iline[l]
+            n_lines = len(segyfile.ilines)
+            idxer = segyfile.ilines
+            n_xlines = len(segyfile.xlines)
+            test_slice = lines(idxer[0])
+            trace_length = test_slice.shape[1]
+            
+        padded_shape = (pad(n_lines, blockshape[0]), pad(n_xlines, blockshape[1]), pad(trace_length, blockshape[2]))
 
         # Loop over groups of 4 inlines
         for plane_set_id in range(padded_shape[0] // blockshape[0]):
             # Need to allocate at every step as this is being sent to another function
-            if (plane_set_id+1)*blockshape[0] > n_ilines:
-                planes_to_read = n_ilines % blockshape[0]
+            if (plane_set_id+1)*blockshape[0] > n_lines:
+                planes_to_read = n_lines % blockshape[0]
             else:
                 planes_to_read = blockshape[0]
 
             segy_buffer = np.zeros((blockshape[0], padded_shape[1], padded_shape[2]), dtype=np.float32)
             for i in range(planes_to_read):
-                data = np.asarray(segyfile.iline[segyfile.ilines[plane_set_id*blockshape[0] + i]])
+                data = np.asarray(lines(idxer[plane_set_id*blockshape[0] + i]))
                 segy_buffer[i, 0:n_xlines, 0:trace_length] = data
 
             if blockshape[0] == 4:

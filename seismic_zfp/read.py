@@ -2,7 +2,7 @@ import os
 import numpy as np
 from pyzfp import decompress
 
-from .utils import pad, bytes_to_int
+from .utils import pad, bytes_to_int, is_2d
 
 DISK_BLOCK_BYTES = 4096
 
@@ -59,9 +59,14 @@ class SzReader:
                           pad(self.xlines, self.blockshape[1]),
                           pad(self.tracelength, self.blockshape[2]))
 
+        if is_2d(self.blockshape):
+            self.factor = 2
+        else:
+            self.factor = 8
         self.unit_bytes = ((4*4*4) * self.rate) // 8
-        self.block_bytes = (self.blockshape[0] * self.blockshape[1] * self.blockshape[2] * self.rate) // 8
+        self.block_bytes = (self.blockshape[0] * self.blockshape[1] * self.blockshape[2] * self.rate) // self.factor
         self.chunk_bytes = self.block_bytes * (self.shape_pad[2] // self.blockshape[2])
+
         assert self.block_bytes == DISK_BLOCK_BYTES
 
         self.data_start_bytes = self.header_blocks * DISK_BLOCK_BYTES
@@ -133,7 +138,36 @@ class SzReader:
             # Default to unoptimized general method
             return np.squeeze(self.read_subvolume(0, self.ilines, xl_id, xl_id+1, 0, self.tracelength))
 
+    def read_2dtrace(self, tr_id):
+        """Reads one inline from SZ file
 
+        Parameters
+        ----------
+        tr_id : int
+            The ordinal number of the trace in the file
+
+        Returns
+        -------
+        trace : numpy.ndarray of float32, shape: (tracelength)
+            The specified trace, decompressed
+        """
+        if self.blockshape[0] == 1 and self.blockshape[1] == 4:
+            tr_block_offset = (self.chunk_bytes * self.shape_pad[0]) * (tr_id//4)
+            with open(self.filename, 'rb') as f:
+                f.seek(self.data_start_bytes + tr_block_offset, 0)
+                # Allocate and read in one go
+                buffer = f.read(self.chunk_bytes * self.shape_pad[0])
+
+            # Specify dtype otherwise pyzfp gets upset.
+            decompressed = decompress(buffer, (self.shape_pad[0], self.blockshape[1], self.shape_pad[2]),
+                                      np.dtype('float32'), rate=self.rate)
+
+            return decompressed[0:self.ilines, tr_id % self.blockshape[1],  0:self.tracelength]
+        else:
+            # Default to unoptimized general method
+            return np.squeeze(self.read_subvolume(0, 1, tr_id, tr_id+1, 0, self.tracelength))
+
+        
     def read_zslice(self, zslice_id):
         """Reads one zslice from SZ file (time or depth, depending on file contents)
 
@@ -255,6 +289,7 @@ class SzReader:
             z_blocks = (max_z+self.blockshape[2]) // self.blockshape[2] - min_z // self.blockshape[2]
             xl_blocks = (max_xl+self.blockshape[1]) // self.blockshape[1] - min_xl // self.blockshape[1]
             il_blocks = (max_il+self.blockshape[0]) // self.blockshape[0] - min_il // self.blockshape[0]
+            if self.ilines == 1: il_blocks = 1
 
             data_padded = np.zeros((il_blocks*self.blockshape[0],
                                     xl_blocks*self.blockshape[1],
@@ -276,6 +311,10 @@ class SzReader:
                                         x*self.blockshape[1]:(x+1)*self.blockshape[1],
                                         z*self.blockshape[2]:(z+1)*self.blockshape[2]] = decompressed
 
+
             return data_padded[min_il%self.blockshape[0]:(min_il%self.blockshape[0])+max_il-min_il,
                                min_xl%self.blockshape[1]:(min_xl%self.blockshape[1])+max_xl-min_xl,
                                min_z%self.blockshape[2]:(min_z%self.blockshape[2])+max_z-min_z]
+
+
+
